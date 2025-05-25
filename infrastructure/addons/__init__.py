@@ -10,8 +10,14 @@ for the EKS cluster, including:
 
 import json
 import pulumi
+import pulumi_aws as aws
 import pulumi_kubernetes as k8s
 from pulumi_kubernetes.helm.v3 import Chart, ChartOpts, FetchOpts
+from pulumi_kubernetes.core.v1 import Namespace, ServiceAccount
+from pulumi_kubernetes.yaml import ConfigGroup
+from pulumi_kubernetes.apiextensions import CustomResource
+from pulumi_kubernetes.meta.v1 import ObjectMetaArgs
+from pulumi_kubernetes.provider import Provider
 
 def setup_addons(
     kubeconfig: pulumi.Output[str], 
@@ -101,201 +107,138 @@ def _install_karpenter(provider, project_name: str, aws_region: str, cluster_nam
     account_id = aws.get_caller_identity().account_id
     
     # Create IAM policy for Karpenter
-    policy_doc = json.dumps({
+    policy_doc = {
         "Version": "2012-10-17",
         "Statement": [
             {
                 "Effect": "Allow",
                 "Action": [
-                    "ec2:CreateLaunchTemplate",
-                    "ec2:CreateFleet",
-                    "ec2:CreateTags",
-                    "ec2:DescribeLaunchTemplates",
-                    "ec2:DescribeInstances",
-                    "ec2:DescribeSecurityGroups",
-                    "ec2:DescribeSubnets",
-                    "ec2:DescribeInstanceTypes",
-                    "ec2:DescribeInstanceTypeOfferings",
-                    "ec2:DescribeAvailabilityZones",
-                    "ec2:DeleteLaunchTemplate",
-                    "ec2:RunInstances",
-                    "ssm:GetParameter",
-                    "pricing:GetProducts",
-                    "ec2:TerminateInstances"
+                    "ec2:RunInstances", "ec2:CreateLaunchTemplate", "ec2:CreateFleet",
+                    "ec2:TerminateInstances", "ec2:DescribeInstances", "ec2:DescribeInstanceTypes",
+                    "ec2:DescribeLaunchTemplates", "ec2:DescribeSubnets", "ec2:DescribeSecurityGroups",
+                    "ec2:DescribeInstanceTypeOfferings", "ec2:DescribeSpotPriceHistory",
+                    "pricing:GetProducts", "ssm:GetParameter", "iam:PassRole"
                 ],
                 "Resource": "*"
-            },
-            {
-                "Effect": "Allow",
-                "Action": "iam:PassRole",
-                "Resource": f"arn:aws:iam::*:role/{project_name}-karpenter-node-role"
             }
         ]
-    })
+    }
     
-    # Create IAM policy
-    policy = aws.iam.Policy(
-        f"{project_name}-karpenter-policy",
-        policy=policy_doc,
-        description="Policy for Karpenter to manage EC2 instances"
+    # Create OIDC provider URL for the EKS cluster
+    # Use pulumi.Output.concat to properly handle the OIDC provider URL
+    oidc_provider_url = pulumi.Output.concat("oidc.eks.", aws_region, ".amazonaws.com/id/", oidc_provider_id)
+    
+    # Create the IAM role with the trust relationship policy
+    role = aws.iam.Role(
+        f"{project_name}-karpenter-role",
+        assume_role_policy=pulumi.Output.all(account_id=account_id, oidc_url=oidc_provider_url).apply(
+            lambda args: json.dumps({
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Principal": {
+                            "Federated": f"arn:aws:iam::{args['account_id']}:oidc-provider/{args['oidc_url']}"
+                        },
+                        "Action": "sts:AssumeRoleWithWebIdentity",
+                        "Condition": {
+                            "StringEquals": {
+                                f"{args['oidc_url']}:aud": "sts.amazonaws.com",
+                                f"{args['oidc_url']}:sub": "system:serviceaccount:karpenter:karpenter"
+                            }
+                        }
+                    }
+                ]
+            })
+        ),
+        tags={"Name": f"{project_name}-karpenter-role"}
     )
     
-    # Define a function to create the IAM role with the OIDC provider ID
-    def create_karpenter_role(provider_id):
-        # Ensure oidc_provider_id doesn't include the full URL
-        if provider_id.startswith('https://'):
-            provider_id = provider_id.split('/')[-1]
-        
-        oidc_provider_arn = f"arn:aws:iam::{account_id}:oidc-provider/oidc.eks.{aws_region}.amazonaws.com/id/{provider_id}"
-        oidc_issuer = f"oidc.eks.{aws_region}.amazonaws.com/id/{provider_id}"
-        
-        return json.dumps({
+    # Create and attach required policies
+    policy = aws.iam.Policy(
+        f"{project_name}-karpenter-policy",
+        description=f"Policy for Karpenter in {project_name}",
+        policy=json.dumps({
             "Version": "2012-10-17",
             "Statement": [
                 {
                     "Effect": "Allow",
-                    "Principal": {
-                        "Federated": oidc_provider_arn
-                    },
-                    "Action": "sts:AssumeRoleWithWebIdentity",
-                    "Condition": {
-                        "StringEquals": {
-                            f"{oidc_issuer}:sub": "system:serviceaccount:karpenter:karpenter"
-                        }
-                    }
+                    "Action": [
+                        "ec2:RunInstances", "ec2:CreateLaunchTemplate", "ec2:CreateFleet",
+                        "ec2:TerminateInstances", "ec2:DescribeInstances", "ec2:DescribeInstanceTypes",
+                        "ec2:DescribeLaunchTemplates", "ec2:DescribeSubnets", "ec2:DescribeSecurityGroups",
+                        "ec2:DescribeInstanceTypeOfferings", "ec2:DescribeSpotPriceHistory",
+                        "pricing:GetProducts", "ssm:GetParameter", "iam:PassRole"
+                    ],
+                    "Resource": "*"
                 }
             ]
         })
-    
-    # Apply the function to the OIDC provider ID output
-    assume_role_policy = oidc_provider_id.apply(create_karpenter_role)
-    
-    role = aws.iam.Role(
-        f"{project_name}-karpenter-role",
-        assume_role_policy=assume_role_policy,
-        description="IAM role for Karpenter controller"
     )
     
-    # Attach the policy to the role
     aws.iam.RolePolicyAttachment(
         f"{project_name}-karpenter-policy-attachment",
         role=role.name,
         policy_arn=policy.arn,
     )
     
+    # Prepare Helm values
+    helm_values = {
+        "serviceAccount": {
+            "create": True,
+            "name": "karpenter",
+            "annotations": {"eks.amazonaws.com/role-arn": role.arn}
+        },
+        "controller": {
+            "clusterName": cluster_name,
+            "clusterEndpoint": cluster_endpoint,
+            "aws": {
+                "defaultInstanceProfile": f"{project_name}-karpenter-instance-profile"
+            },
+            "replicas": karpenter_config.get("replicas", 2),
+            "resources": {
+                "limits": {"cpu": "1", "memory": "1Gi"},
+                "requests": {"cpu": "1", "memory": "1Gi"}
+            }
+        },
+        "logLevel": "debug"
+    }
+    
+    # Add instance types if specified in config
+    if "instanceTypes" in karpenter_config:
+        helm_values["controller"]["aws"]["defaultInstanceTypes"] = karpenter_config["instanceTypes"]
+    
+    # Get version from config with a default fallback
+    chart_version = karpenter_config.get('version', 'v0.15.0')
+    
     # Install Karpenter using Helm
     karpenter_chart = Chart(
         "karpenter",
         ChartOpts(
             chart="karpenter",
-            version=karpenter_config.get("version", "v0.36.1"),
-            fetch_opts=FetchOpts(
-                repo="https://charts.karpenter.sh"
-            ),
+            version=chart_version,
+            fetch_opts=FetchOpts(repo="https://charts.karpenter.sh"),
             namespace="karpenter",
-            values={
-                "serviceAccount": {
-                    "create": True,
-                    "name": "karpenter",
-                    "annotations": {
-                        "eks.amazonaws.com/role-arn": role.arn
-                    }
-                },
-                "controller": {
-                    "clusterName": cluster_name,
-                    "clusterEndpoint": cluster_endpoint,
-                    "aws": {
-                        "defaultInstanceProfile": f"{project_name}-karpenter-instance-profile",
-                        "interruptionQueueName": f"{project_name}-karpenter-interruption-queue"
-                    },
-                    "replicas": karpenter_config.get("replicas", 2)
-                },
-                "webhook": {
-                    "replicas": karpenter_config.get("replicas", 2)
-                },
-                "resources": {
-                    "requests": {
-                        "cpu": "1",
-                        "memory": "1Gi"
-                    },
-                    "limits": {
-                        "cpu": "1",
-                        "memory": "1Gi"
-                    }
-                }
-            }
+            values=helm_values
         ),
-        opts=pulumi.ResourceOptions(provider=provider, depends_on=[ns, role, policy])
+        opts=pulumi.ResourceOptions(
+            provider=provider,
+            depends_on=[ns, role, policy],
+            ignore_changes=["version"]
+        )
     )
     
-    # Create default Karpenter Provisioner
-    k8s.apiextensions.CustomResource(
-        "karpenter-default-provisioner",
-        api_version="karpenter.sh/v1alpha5",
-        kind="Provisioner",
-        metadata={
-            "name": "default",
-            "namespace": "karpenter"
-        },
-        spec={
-            "requirements": [
-                {
-                    "key": "karpenter.sh/capacity-type",
-                    "operator": "In",
-                    "values": karpenter_config.get("capacityType", ["on-demand"])
-                },
-                {
-                    "key": "kubernetes.io/arch",
-                    "operator": "In",
-                    "values": karpenter_config.get("architectures", ["amd64"])
-                },
-                {
-                    "key": "karpenter.k8s.aws/instance-type",
-                    "operator": "In",
-                    "values": karpenter_config.get("instanceTypes", ["m5.large", "m5.xlarge", "m5.2xlarge"])
-                }
-            ],
-            "limits": {
-                "resources": {
-                    "cpu": "1000",
-                    "memory": "1000Gi"
-                }
-            },
-            "providerRef": {
-                "name": "default"
-            },
-            "consolidation": {
-                "enabled": True
-            },
-            "ttlSecondsUntilExpired": karpenter_config.get("ttlSecondsUntilExpired", 2592000),  # 30 days
-            "ttlSecondsAfterEmpty": karpenter_config.get("ttlSecondsAfterEmpty", 30)
-        },
-        opts=pulumi.ResourceOptions(provider=provider, depends_on=[karpenter_chart])
-    )
+    # Export important values
+    pulumi.export('karpenter_ready', True)
+    pulumi.export('karpenter_role_arn', role.arn)
     
-    # Create AWSNodeTemplate
-    k8s.apiextensions.CustomResource(
-        "karpenter-awsnodetemplate",
-        api_version="karpenter.k8s.aws/v1alpha1",
-        kind="AWSNodeTemplate",
-        metadata={
-            "name": "default",
-            "namespace": "karpenter"
-        },
-        spec={
-            "subnetSelector": {
-                "karpenter.sh/discovery": cluster_name
-            },
-            "securityGroupSelector": {
-                "karpenter.sh/discovery": cluster_name
-            },
-            "tags": {
-                "karpenter.sh/discovery": cluster_name,
-                "karpenter.sh/managed-by": "karpenter"
-            }
-        },
-        opts=pulumi.ResourceOptions(provider=provider, depends_on=[karpenter_chart])
-    )
+    return {
+        "namespace": ns,
+        "chart": karpenter_chart,
+        "role": role,
+        "policy": policy,
+        "service_account": "karpenter"
+    }
 
 def _install_ebs_csi_driver(provider, project_name: str, aws_region: str) -> None:
     """Install AWS EBS CSI Driver for dynamic provisioning of EBS volumes.
