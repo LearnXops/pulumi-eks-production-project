@@ -1,0 +1,21 @@
+{
+  "project": {
+    "name": "production-eks"
+  },
+  "eks": {
+    "node": {
+      "instanceType": "t3.medium",
+      "minSize": 2,
+      "maxSize": 5,
+      "desiredSize": 2
+    },
+    "addons": {
+      "enable": true,
+      "clusterAutoscaler": true,
+      "awsLoadBalancerController": true,
+      "externalDns": true,
+      "certManager": true,
+      "ebsCsiDriver": true
+    }
+  }
+}

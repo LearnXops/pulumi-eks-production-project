@@ -1,0 +1,7 @@
+pulumi>=3.0.0
+pulumi-aws>=6.0.0
+pulumi-kubernetes>=4.0.0
+pulumi-eks>=0.40.0
+pulumi-awsx>=1.0.0
+python-dotenv>=0.19.0
+pytest>=7.0.0

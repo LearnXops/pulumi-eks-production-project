@@ -1,0 +1,13 @@
+name: aws-eks-production
+description: Production-grade AWS EKS cluster using Pulumi Python
+runtime:
+  name: python
+  options:
+    virtualenv: venv
+template:
+  description: A production-grade AWS EKS cluster with all necessary components
+  config:
+    aws-region:
+      type: string
+      description: The AWS region to deploy to
+      default: us-west-2
