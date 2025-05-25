@@ -11,9 +11,17 @@
     },
     "addons": {
       "enable": true,
-      "externalDns": true,
-      "certManager": true,
-      "ebsCsiDriver": true
-    }
+      "ebsCsiDriver": true,
+      "karpenter": true
+    },
+  "karpenter": {
+    "version": "v0.36.1",
+    "replicas": 2,
+    "instanceTypes": ["m5.large", "m5.xlarge", "m5.2xlarge"],
+    "architectures": ["amd64"],
+    "capacityType": ["on-demand"],
+    "ttlSecondsUntilExpired": 2592000,
+    "ttlSecondsAfterEmpty": 30
+  }
   }
 }

@@ -3,13 +3,9 @@ Kubernetes Add-ons Module
 
 This module handles the installation and configuration of essential Kubernetes add-ons
 for the EKS cluster, including:
-- AWS Load Balancer Controller
-- Cluster Autoscaler
 - Metrics Server
-- Kubernetes Dashboard
-- External DNS
-- Cert Manager
 - AWS EBS CSI Driver
+- Karpenter
 """
 
 import json
@@ -23,38 +19,38 @@ def setup_addons(
     aws_region: str,
     addons_config: dict,
     cluster_name: str,
-    vpc_id: str
+    vpc_id: str,
+    karpenter_config: dict = None
 ) -> None:
-    """
-    Install and configure Kubernetes add-ons for the EKS cluster.
+    """Install all configured Kubernetes add-ons for the EKS cluster.
     
     Args:
-        kubeconfig: Kubeconfig for the EKS cluster
-        project_name: Name of the project for resource naming and tagging
+        kubeconfig: The kubeconfig for the EKS cluster
+        project_name: Name of the project for resource naming
         aws_region: AWS region where the cluster is deployed
-        addons_config: Configuration for add-ons
+        addons_config: Configuration for the add-ons to install
+        cluster_name: Name of the EKS cluster
+        vpc_id: The VPC ID where the EKS cluster is deployed
+        karpenter_config: Configuration for Karpenter (optional)
     """
     # Create a Kubernetes provider instance
     k8s_provider = k8s.Provider(
-        f"{project_name}-k8s-provider",
+        "k8s-provider",
         kubeconfig=kubeconfig,
+        enable_server_side_apply=True
     )
     
     # Install Metrics Server (enabled by default)
     if addons_config.get("metricsServer", True):
         _install_metrics_server(k8s_provider, project_name)
     
-    # Install External DNS if enabled
-    if addons_config.get("externalDns", True):
-        _install_external_dns(k8s_provider, project_name, aws_region)
-    
-    # Install Cert Manager if enabled
-    if addons_config.get("certManager", True):
-        _install_cert_manager(k8s_provider, project_name)
-    
     # Install AWS EBS CSI Driver if enabled
     if addons_config.get("ebsCsiDriver", True):
         _install_ebs_csi_driver(k8s_provider, project_name, aws_region)
+    
+    # Install Karpenter if enabled
+    if addons_config.get("karpenter", False) and karpenter_config:
+        _install_karpenter(k8s_provider, project_name, aws_region, cluster_name, karpenter_config)
 
 def _install_metrics_server(provider, project_name: str) -> None:
     """Install Metrics Server for Kubernetes metrics aggregation."""
@@ -71,151 +67,26 @@ def _install_metrics_server(provider, project_name: str) -> None:
         opts=pulumi.ResourceOptions(provider=provider),
     )
 
-def _install_external_dns(provider, project_name: str, aws_region: str) -> None:
-    """Install External DNS for managing DNS records in Route 53.
-    
-    Args:
-        provider: The Kubernetes provider
-        project_name: Name of the project for resource naming
-        aws_region: AWS region where the cluster is deployed
-    """
+def _install_ebs_csi_driver(provider, project_name: str, aws_region: str) -> None:
+    """Install AWS EBS CSI Driver for EBS volume management."""
     Chart(
-        "external-dns",
+        "aws-ebs-csi-driver",
         ChartOpts(
-            chart="external-dns",
-            version="1.14.0",
+            chart="aws-ebs-csi-driver",
+            version="2.4.0",
             fetch_opts=FetchOpts(
-                repo="https://kubernetes-sigs.github.io/external-dns",
+                repo="https://kubernetes-sigs.github.io/aws-ebs-csi-driver",
             ),
             namespace="kube-system",
             values={
                 "serviceAccount": {
                     "create": True,
-                    "name": "external-dns",
+                    "name": "ebs-csi-controller-sa",
                     "annotations": {
-                        "eks.amazonaws.com/role-arn": f"arn:aws:iam::${{pulumi.get_stack()}}:role/{project_name}-external-dns-role"
-                    },
-                },
-                "provider": "aws",
-                "policy": "sync",
-                "aws": {
-                    "region": aws_region,
-                    "zoneType": "public",
-                },
-                "sources": ["service", "ingress"],
-                "logLevel": "info",
-                "logFormat": "json",
-                "interval": "1m",
-                "triggerLoopOnEvent": True,
-                "replicas": 2,
-                "resources": {
-                    "limits": {
-                        "cpu": "100m",
-                        "memory": "256Mi"
-                    },
-                    "requests": {
-                        "cpu": "50m",
-                        "memory": "128Mi"
+                        "eks.amazonaws.com/role-arn": f"arn:aws:iam::${{pulumi.get_stack()}}:role/{project_name}-ebs-csi-driver-role"
                     }
                 },
-                "nodeSelector": {
-                    "kubernetes.io/os": "linux"
-                },
-                "tolerations": [
-                    {
-                        "key": "CriticalAddonsOnly",
-                        "operator": "Exists"
-                    }
-                ],
-                "affinity": {
-                    "podAntiAffinity": {
-                        "preferredDuringSchedulingIgnoredDuringExecution": [
-                            {
-                                "weight": 100,
-                                "podAffinityTerm": {
-                                    "labelSelector": {
-                                        "matchExpressions": [
-                                            {
-                                                "key": "app.kubernetes.io/name",
-                                                "operator": "In",
-                                                "values": ["external-dns"]
-                                            }
-                                        ]
-                                    },
-                                    "topologyKey": "kubernetes.io/hostname"
-                                }
-                            }
-                        ]
-                    }
-                }
-            },
-        ),
-        opts=pulumi.ResourceOptions(provider=provider, depends_on=[provider]),
-    )
-
-def _install_cert_manager(provider, project_name: str) -> None:
-    """Install Cert Manager for managing TLS certificates."""
-    # Create the cert-manager namespace
-    ns = k8s.core.v1.Namespace(
-        "cert-manager",
-        metadata={"name": "cert-manager"},
-        opts=pulumi.ResourceOptions(provider=provider),
-    )
-    
-    # Install cert-manager
-    Chart(
-        "cert-manager",
-        ChartOpts(
-            chart="cert-manager",
-            version="v1.7.1",
-            fetch_opts=FetchOpts(
-                repo="https://charts.jetstack.io",
-            ),
-            namespace=ns.metadata["name"],
-            values={
-                "installCRDs": True,
-                "replicaCount": 2,
-                "resources": {
-                    "requests": {
-                        "cpu": "100m",
-                        "memory": "128Mi"
-                    },
-                    "limits": {
-                        "cpu": "500m",
-                        "memory": "512Mi"
-                    }
-                },
-                "nodeSelector": {
-                    "kubernetes.io/os": "linux"
-                },
-                "tolerations": [
-                    {
-                        "key": "CriticalAddonsOnly",
-                        "operator": "Exists"
-                    }
-                ],
-                "affinity": {
-                    "podAntiAffinity": {
-                        "preferredDuringSchedulingIgnoredDuringExecution": [
-                            {
-                                "weight": 100,
-                                "podAffinityTerm": {
-                                    "labelSelector": {
-                                        "matchExpressions": [
-                                            {
-                                                "key": "app.kubernetes.io/name",
-                                                "operator": "In",
-                                                "values": ["cert-manager"]
-                                            }
-                                        ]
-                                    },
-                                    "topologyKey": "kubernetes.io/hostname"
-                                }
-                            }
-                        ]
-                    }
-                },
-                "webhook": {
+                "controller": {
                     "replicaCount": 2,
                     "resources": {
                         "requests": {
@@ -245,9 +116,95 @@ def _install_cert_manager(provider, project_name: str) -> None:
                                         "labelSelector": {
                                             "matchExpressions": [
                                                 {
-                                                    "key": "app.kubernetes.io/component",
+                                                    "key": "app.kubernetes.io/name",
                                                     "operator": "In",
-                                                    "values": ["webhook"]
+                                                    "values": ["aws-ebs-csi-driver"]
+                                                }
+                                            ]
+                                        },
+                                        "topologyKey": "kubernetes.io/hostname"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                },
+                "node": {
+                    "replicaCount": 2,
+                    "resources": {
+                        "requests": {
+                            "cpu": "100m",
+                            "memory": "128Mi"
+                        },
+                        "limits": {
+                            "cpu": "500m",
+                            "memory": "512Mi"
+                        }
+                    },
+                    "nodeSelector": {
+                        "kubernetes.io/os": "linux"
+                    },
+                    "tolerations": [
+                        {
+                            "key": "CriticalAddonsOnly",
+                            "operator": "Exists"
+                        }
+                    ],
+                    "affinity": {
+                        "podAntiAffinity": {
+                            "preferredDuringSchedulingIgnoredDuringExecution": [
+                                {
+                                    "weight": 100,
+                                    "podAffinityTerm": {
+                                        "labelSelector": {
+                                            "matchExpressions": [
+                                                {
+                                                    "key": "app.kubernetes.io/name",
+                                                    "operator": "In",
+                                                    "values": ["aws-ebs-csi-driver"]
+                                                }
+                                            ]
+                                        },
+                                        "topologyKey": "kubernetes.io/hostname"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                },
+                "snapshotController": {
+                    "replicaCount": 2,
+                    "resources": {
+                        "requests": {
+                            "cpu": "100m",
+                            "memory": "128Mi"
+                        },
+                        "limits": {
+                            "cpu": "500m",
+                            "memory": "512Mi"
+                        }
+                    },
+                    "nodeSelector": {
+                        "kubernetes.io/os": "linux"
+                    },
+                    "tolerations": [
+                        {
+                            "key": "CriticalAddonsOnly",
+                            "operator": "Exists"
+                        }
+                    ],
+                    "affinity": {
+                        "podAntiAffinity": {
+                            "preferredDuringSchedulingIgnoredDuringExecution": [
+                                {
+                                    "weight": 100,
+                                    "podAffinityTerm": {
+                                        "labelSelector": {
+                                            "matchExpressions": [
+                                                {
+                                                    "key": "app.kubernetes.io/name",
+                                                    "operator": "In",
+                                                    "values": ["aws-ebs-csi-driver"]
                                                 }
                                             ]
                                         },
@@ -318,6 +275,222 @@ def _install_cert_manager(provider, project_name: str) -> None:
             },
         ),
         opts=pulumi.ResourceOptions(provider=provider, depends_on=[ns]),
+    )
+
+def _install_karpenter(provider, project_name: str, aws_region: str, cluster_name: str, karpenter_config: dict) -> None:
+    """Install Karpenter for node autoscaling.
+    
+    Args:
+        provider: The Kubernetes provider
+        project_name: Name of the project for resource naming
+        aws_region: AWS region where the cluster is deployed
+        cluster_name: Name of the EKS cluster
+        karpenter_config: Configuration for Karpenter
+    """
+    import pulumi_aws as aws
+    import pulumi_kubernetes as k8s
+    import json
+    
+    # Create Karpenter namespace
+    ns = k8s.core.v1.Namespace(
+        "karpenter",
+        metadata={"name": "karpenter"},
+        opts=pulumi.ResourceOptions(provider=provider)
+    )
+    
+    # Create IAM policy for Karpenter
+    policy_doc = json.dumps({
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Action": [
+                    "ec2:CreateLaunchTemplate",
+                    "ec2:CreateFleet",
+                    "ec2:CreateTags",
+                    "ec2:DescribeLaunchTemplates",
+                    "ec2:DescribeInstances",
+                    "ec2:DescribeSecurityGroups",
+                    "ec2:DescribeSubnets",
+                    "ec2:DescribeInstanceTypes",
+                    "ec2:DescribeInstanceTypeOfferings",
+                    "ec2:DescribeAvailabilityZones",
+                    "ec2:DeleteLaunchTemplate",
+                    "ec2:RunInstances",
+                    "ssm:GetParameter",
+                    "pricing:GetProducts",
+                    "ec2:TerminateInstances"
+                ],
+                "Resource": "*"
+            },
+            {
+                "Effect": "Allow",
+                "Action": "iam:PassRole",
+                "Resource": f"arn:aws:iam::*:role/{project_name}-karpenter-node-role"
+            }
+        ]
+    })
+    
+    # Create IAM policy
+    policy = aws.iam.Policy(
+        f"{project_name}-karpenter-policy",
+        policy=policy_doc,
+        description="Policy for Karpenter to manage EC2 instances"
+    )
+    
+    # Create IAM role for Karpenter controller
+    assume_role_policy = json.dumps({
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Principal": {
+                    "Federated": f"arn:aws:iam::{pulumi.get_stack()}:oidc-provider/oidc.eks.{aws_region}.amazonaws.com/id/{provider.resource_name}"
+                },
+                "Action": "sts:AssumeRoleWithWebIdentity",
+                "Condition": {
+                    "StringEquals": {
+                        f"oidc.eks.{aws_region}.amazonaws.com/id/{provider.resource_name}:sub": "system:serviceaccount:karpenter:karpenter"
+                    }
+                }
+            }
+        ]
+    })
+    
+    role = aws.iam.Role(
+        f"{project_name}-karpenter-role",
+        assume_role_policy=assume_role_policy,
+        description="IAM role for Karpenter controller"
+    )
+    
+    # Attach the policy to the role
+    aws.iam.RolePolicyAttachment(
+        f"{project_name}-karpenter-policy-attachment",
+        role=role.name,
+        policy_arn=policy.arn,
+    )
+    
+    # Install Karpenter using Helm
+    karpenter_chart = Chart(
+        "karpenter",
+        ChartOpts(
+            chart="karpenter",
+            version=karpenter_config.get("version", "v0.36.1"),
+            fetch_opts=FetchOpts(
+                repo="https://charts.karpenter.sh"
+            ),
+            namespace="karpenter",
+            values={
+                "serviceAccount": {
+                    "create": True,
+                    "name": "karpenter",
+                    "annotations": {
+                        "eks.amazonaws.com/role-arn": role.arn
+                    }
+                },
+                "controller": {
+                    "clusterName": cluster_name,
+                    "clusterEndpoint": provider.cluster_endpoint,
+                    "aws": {
+                        "defaultInstanceProfile": f"{project_name}-karpenter-instance-profile",
+                        "interruptionQueueName": f"{project_name}-karpenter-interruption-queue"
+                    },
+                    "replicas": karpenter_config.get("replicas", 2)
+                },
+                "webhook": {
+                    "replicas": karpenter_config.get("replicas", 2)
+                },
+                "resources": {
+                    "requests": {
+                        "cpu": "1",
+                        "memory": "1Gi"
+                    },
+                    "limits": {
+                        "cpu": "1",
+                        "memory": "1Gi"
+                    }
+                },
+                "nodeSelector": {
+                    "kubernetes.io/os": "linux"
+                },
+                "tolerations": [
+                    {
+                        "key": "CriticalAddonsOnly",
+                        "operator": "Exists"
+                    }
+                ]
+            }
+        ),
+        opts=pulumi.ResourceOptions(provider=provider, depends_on=[ns, role, policy])
+    )
+    
+    # Create default Karpenter Provisioner
+    k8s.apiextensions.CustomResource(
+        "karpenter-default-provisioner",
+        api_version="karpenter.sh/v1alpha5",
+        kind="Provisioner",
+        metadata={
+            "name": "default",
+            "namespace": "karpenter"
+        },
+        spec={
+            "requirements": [
+                {
+                    "key": "karpenter.sh/capacity-type",
+                    "operator": "In",
+                    "values": karpenter_config.get("capacityType", ["on-demand"])
+                },
+                {
+                    "key": "kubernetes.io/arch",
+                    "operator": "In",
+                    "values": karpenter_config.get("architectures", ["amd64"])
+                },
+                {
+                    "key": "karpenter.k8s.aws/instance-type",
+                    "operator": "In",
+                    "values": karpenter_config.get("instanceTypes", ["m5.large", "m5.xlarge", "m5.2xlarge"])
+                }
+            ],
+            "limits": {
+                "resources": {
+                    "cpu": "1000",
+                    "memory": "1000Gi"
+                }
+            },
+            "providerRef": {
+                "name": "default"
+            },
+            "consolidation": {
+                "enabled": True
+            },
+            "ttlSecondsUntilExpired": karpenter_config.get("ttlSecondsUntilExpired", 2592000),  # 30 days
+            "ttlSecondsAfterEmpty": karpenter_config.get("ttlSecondsAfterEmpty", 30)
+        },
+        opts=pulumi.ResourceOptions(provider=provider, depends_on=[karpenter_chart])
+    )
+    
+    # Create AWSNodeTemplate
+    k8s.apiextensions.CustomResource(
+        "karpenter-awsnodetemplate",
+        api_version="karpenter.k8s.aws/v1alpha1",
+        kind="AWSNodeTemplate",
+        metadata={
+            "name": "default",
+            "namespace": "karpenter"
+        },
+        spec={
+            "subnetSelector": {
+                "karpenter.sh/discovery": cluster_name
+            },
+            "securityGroupSelector": {
+                "karpenter.sh/discovery": cluster_name
+            },
+            "tags": {
+                "karpenter.sh/discovery": cluster_name,
+                "karpenter.sh/managed-by": "karpenter"
+            }
+        },
+        opts=pulumi.ResourceOptions(provider=provider, depends_on=[karpenter_chart])
     )
 
 def _install_ebs_csi_driver(provider, project_name: str, aws_region: str) -> None:

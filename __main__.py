@@ -65,13 +65,20 @@ def main():
     addons_config = eks_config["eks"].get("addons", {})
     if addons_config.get("enable", True):
         aws_region = config.require("aws-region")
+        
+        # Get Karpenter configuration if enabled
+        karpenter_config = None
+        if addons_config.get("karpenter", False):
+            karpenter_config = eks_config.get("karpenter", {})
+        
         setup_addons(
             kubeconfig=cluster.kubeconfig,
             project_name=project_name,
             aws_region=aws_region,
             addons_config=addons_config,
             cluster_name=cluster.eks_cluster.name,
-            vpc_id=vpc.vpc_id
+            vpc_id=vpc.vpc_id,
+            karpenter_config=karpenter_config
         )
     
     # Export values
