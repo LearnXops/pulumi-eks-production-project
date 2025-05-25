@@ -15,10 +15,11 @@ class EksOutput:
     """
     A class to hold EKS cluster related outputs.
     """
-    def __init__(self, kubeconfig, eks_cluster, node_groups):
+    def __init__(self, kubeconfig, eks_cluster, node_groups, oidc_provider_id=None):
         self.kubeconfig = kubeconfig
         self.eks_cluster = eks_cluster
         self.node_groups = node_groups
+        self.oidc_provider_id = oidc_provider_id
 
 def create_eks_cluster(
     project_name: str,
@@ -119,8 +120,11 @@ def create_eks_cluster(
         },
     )
 
+    # Get the OIDC provider ID from the cluster's OIDC provider URL
+    oidc_provider_id = cluster.core.oidc_provider.url.apply(lambda url: url.split('/')[-1])
     return EksOutput(
         kubeconfig=cluster.kubeconfig,
         eks_cluster=cluster,
         node_groups={"default": node_group},
+        oidc_provider_id=oidc_provider_id
     )

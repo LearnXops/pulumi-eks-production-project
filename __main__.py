@@ -69,21 +69,24 @@ def main():
         # Get Karpenter configuration if enabled
         karpenter_config = None
         if addons_config.get("karpenter", False):
-            karpenter_config = eks_config.get("karpenter", {})
+            karpenter_config = eks_config["eks"].get("karpenter", {})
         
         setup_addons(
             kubeconfig=cluster.kubeconfig,
             project_name=project_name,
             aws_region=aws_region,
             addons_config=addons_config,
-            cluster_name=cluster.eks_cluster.name,
+            cluster_name=cluster.eks_cluster.core.cluster.name,
             vpc_id=vpc.vpc_id,
-            karpenter_config=karpenter_config
+            karpenter_config=karpenter_config,
+            oidc_provider_id=cluster.oidc_provider_id,
+            cluster_endpoint=cluster.eks_cluster.core.cluster.endpoint,
+            cluster_ca=cluster.eks_cluster.core.cluster.certificate_authority['data']
         )
     
     # Export values
     pulumi.export('kubeconfig', cluster.kubeconfig)
-    pulumi.export('cluster_name', cluster.eks_cluster.name)
+    pulumi.export('cluster_name', cluster.eks_cluster.core.cluster.name)
     pulumi.export('vpc_id', vpc.vpc_id)
 
 if __name__ == "__main__":
