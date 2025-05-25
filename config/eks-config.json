@@ -11,8 +11,6 @@
     },
     "addons": {
       "enable": true,
-      "clusterAutoscaler": true,
-      "awsLoadBalancerController": true,
       "externalDns": true,
       "certManager": true,
       "ebsCsiDriver": true
